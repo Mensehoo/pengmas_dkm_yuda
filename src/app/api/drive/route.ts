@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { Readable } from 'stream';
 
 function getCleanPrivateKey(key?: string) {
   if (!key) return '';
@@ -34,7 +35,7 @@ export async function POST(request: Request) {
 
     const hasGoogleServiceAccount = Boolean(serviceEmail && privateKey);
 
-    let driveViewLink = `https://drive.google.com/file/d/mock_${Date.now()}_${type.toLowerCase()}/view`;
+    let driveViewLink = '';
     let uploadError = '';
     let isRealUpload = false;
 
@@ -45,35 +46,62 @@ export async function POST(request: Request) {
           serviceEmail,
           undefined,
           privateKey,
-          ['https://www.googleapis.com/auth/drive']
+          [
+            'https://www.googleapis.com/auth/drive',
+            'https://www.googleapis.com/auth/drive.file'
+          ]
         );
 
         const drive = google.drive({ version: 'v3', auth });
+        
+        // Convert File ArrayBuffer to Node Readable Stream (required by googleapis in serverless)
         const arrayBuffer = await file.arrayBuffer();
-        const buffer = Buffer.from(arrayBuffer);
+        const fileBuffer = Buffer.from(arrayBuffer);
 
-        const fileMetadata: any = {
-          name: `${letterNumber.replace(/[\/\\:]/g, '_')}_${file.name}`,
-        };
+        const sanitizeName = `${letterNumber.replace(/[\/\\:]/g, '_')}_${file.name.replace(/[\/\\:]/g, '_')}`;
 
+        let createResponse: any = null;
+
+        // Try uploading into specific Drive folder first
         if (driveFolderId) {
-          fileMetadata.parents = [driveFolderId];
+          try {
+            createResponse = await drive.files.create({
+              requestBody: {
+                name: sanitizeName,
+                parents: [driveFolderId],
+              },
+              media: {
+                mimeType: file.type || 'application/pdf',
+                body: Readable.from(fileBuffer),
+              },
+              fields: 'id, webViewLink, webContentLink',
+            });
+          } catch (folderErr: any) {
+            console.warn('Upload with folder parent failed, trying root upload:', folderErr?.message);
+          }
         }
 
-        const response = await drive.files.create({
-          requestBody: fileMetadata,
-          media: {
-            mimeType: file.type || 'application/pdf',
-            body: buffer,
-          },
-          fields: 'id, webViewLink, webContentLink',
-        });
+        // Fallback: upload without parent folder if folder upload failed or folder ID not specified
+        if (!createResponse) {
+          createResponse = await drive.files.create({
+            requestBody: {
+              name: sanitizeName,
+            },
+            media: {
+              mimeType: file.type || 'application/pdf',
+              body: Readable.from(fileBuffer),
+            },
+            fields: 'id, webViewLink, webContentLink',
+          });
+        }
 
-        if (response.data.id) {
-          // Make file viewable by anyone with link
+        if (createResponse?.data?.id) {
+          const fileId = createResponse.data.id;
+
+          // Set permission so link is viewable by anyone
           try {
             await drive.permissions.create({
-              fileId: response.data.id,
+              fileId: fileId,
               requestBody: {
                 role: 'reader',
                 type: 'anyone',
@@ -83,7 +111,7 @@ export async function POST(request: Request) {
             console.warn('Could not set public permission on Drive file:', permErr);
           }
 
-          driveViewLink = response.data.webViewLink || `https://drive.google.com/file/d/${response.data.id}/view`;
+          driveViewLink = `https://drive.google.com/file/d/${fileId}/view?usp=sharing`;
           isRealUpload = true;
         }
       } catch (err: any) {
@@ -91,14 +119,19 @@ export async function POST(request: Request) {
         uploadError = err?.message || String(err);
       }
     } else {
-      uploadError = 'Missing GOOGLE_SERVICE_ACCOUNT_EMAIL or GOOGLE_PRIVATE_KEY environment variables in Vercel';
+      uploadError = 'Missing GOOGLE_SERVICE_ACCOUNT_EMAIL or GOOGLE_PRIVATE_KEY environment variables';
+    }
+
+    // Fallback URL if upload failed
+    if (!driveViewLink) {
+      driveViewLink = `https://drive.google.com/file/d/simulated_${Date.now()}/view`;
     }
 
     return NextResponse.json({
       success: isRealUpload,
       message: isRealUpload
         ? 'File PDF berhasil di-upload ke Google Drive'
-        : `Simulasi upload (Drive API: ${uploadError || 'Service Account tidak aktif'})`,
+        : `Simulasi upload (Drive API error: ${uploadError})`,
       driveUrl: driveViewLink,
       fileName: file.name,
       uploadedAt: new Date().toISOString(),
