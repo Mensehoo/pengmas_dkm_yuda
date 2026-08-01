@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server';
-import { Readable } from 'stream';
+
+// Explicitly run in Node.js runtime for googleapis stream compatibility
+export const runtime = 'nodejs';
 
 function getCleanPrivateKey(key?: string) {
   if (!key) return '';
@@ -10,10 +12,19 @@ function getCleanPrivateKey(key?: string) {
   return cleaned.replace(/\\n/g, '\n');
 }
 
+// Reliable buffer-to-readable-stream helper for googleapis in serverless
+function bufferToStream(buffer: Buffer) {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { Readable } = require('stream');
+  const stream = new Readable();
+  stream.push(buffer);
+  stream.push(null);
+  return stream;
+}
+
 /**
  * Server API handler for Google Drive PDF upload
  * Accepts FormData with file & metadata.
- * Communicates with Google Drive API via googleapis package when GOOGLE_SERVICE_ACCOUNT credentials exist.
  */
 export async function POST(request: Request) {
   try {
@@ -53,66 +64,67 @@ export async function POST(request: Request) {
         );
 
         const drive = google.drive({ version: 'v3', auth });
-        
-        // Convert File ArrayBuffer to Node Readable Stream (required by googleapis in serverless)
+
+        // Convert File to Buffer, then to a proper Readable stream for googleapis
         const arrayBuffer = await file.arrayBuffer();
         const fileBuffer = Buffer.from(arrayBuffer);
 
-        const sanitizeName = `${letterNumber.replace(/[\/\\:]/g, '_')}_${file.name.replace(/[\/\\:]/g, '_')}`;
+        const sanitizeName = `${letterNumber.replace(/[\/\\:*?"<>|]/g, '_')}_${type}.pdf`;
 
-        let createResponse: any = null;
+        let fileId: string | null = null;
 
-        // Try uploading into specific Drive folder first
+        // 1) Try uploading to specific Drive folder
         if (driveFolderId) {
           try {
-            createResponse = await drive.files.create({
+            const res = await drive.files.create({
               requestBody: {
                 name: sanitizeName,
                 parents: [driveFolderId],
+                mimeType: 'application/pdf',
               },
               media: {
-                mimeType: file.type || 'application/pdf',
-                body: Readable.from(fileBuffer),
+                mimeType: 'application/pdf',
+                body: bufferToStream(fileBuffer),
               },
-              fields: 'id, webViewLink, webContentLink',
+              fields: 'id',
             });
+            fileId = res.data.id ?? null;
           } catch (folderErr: any) {
-            console.warn('Upload with folder parent failed, trying root upload:', folderErr?.message);
+            console.error('Upload to folder failed, will retry without parent:', folderErr?.message);
           }
         }
 
-        // Fallback: upload without parent folder if folder upload failed or folder ID not specified
-        if (!createResponse) {
-          createResponse = await drive.files.create({
+        // 2) Fallback: upload to root Drive (no parent)
+        if (!fileId) {
+          const res = await drive.files.create({
             requestBody: {
               name: sanitizeName,
+              mimeType: 'application/pdf',
             },
             media: {
-              mimeType: file.type || 'application/pdf',
-              body: Readable.from(fileBuffer),
+              mimeType: 'application/pdf',
+              body: bufferToStream(fileBuffer),
             },
-            fields: 'id, webViewLink, webContentLink',
+            fields: 'id',
           });
+          fileId = res.data.id ?? null;
         }
 
-        if (createResponse?.data?.id) {
-          const fileId = createResponse.data.id;
-
-          // Set permission so link is viewable by anyone
+        if (fileId) {
+          // 3) Set permission: anyone with link can view
           try {
             await drive.permissions.create({
-              fileId: fileId,
-              requestBody: {
-                role: 'reader',
-                type: 'anyone',
-              },
+              fileId,
+              requestBody: { role: 'reader', type: 'anyone' },
             });
           } catch (permErr) {
-            console.warn('Could not set public permission on Drive file:', permErr);
+            console.warn('Could not set public permission:', permErr);
           }
 
           driveViewLink = `https://drive.google.com/file/d/${fileId}/view?usp=sharing`;
           isRealUpload = true;
+        } else {
+          uploadError = 'File ID tidak ditemukan setelah upload — files.create tidak mengembalikan ID.';
         }
       } catch (err: any) {
         console.error('Google Drive API upload failed:', err);
