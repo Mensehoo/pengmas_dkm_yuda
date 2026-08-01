@@ -88,6 +88,17 @@ export function SuratMasukForm({ onSaveLetter, onNavigateArsip }: SuratMasukForm
         month: dateObj.getMonth() + 1,
       };
 
+      // Post metadata to Google Sheets API
+      try {
+        await fetch('/api/letters', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(newLetter),
+        });
+      } catch (sheetsErr) {
+        console.warn('Google Sheets API sync error:', sheetsErr);
+      }
+
       onSaveLetter(newLetter);
 
       toast({

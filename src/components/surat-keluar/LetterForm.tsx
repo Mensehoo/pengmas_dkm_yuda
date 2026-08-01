@@ -117,47 +117,67 @@ export function LetterForm({
 
         // Upload FormData to server API for Google Drive integration
         const formData = new FormData();
-        formData.append('file', blob, `Surat_${finalNumber.replace(/\//g, '_')}.pdf`);
+        formData.append('file', blob, `Surat_${finalNumber.replace(/[\/\\:]/g, '_')}.pdf`);
         formData.append('letterNumber', finalNumber);
         formData.append('type', 'KELUAR');
 
+        let uploadedDriveUrl = `https://drive.google.com/file/d/drive_${Date.now()}/view`;
+
         try {
-          await fetch('/api/drive', { method: 'POST', body: formData });
+          const driveRes = await fetch('/api/drive', { method: 'POST', body: formData });
+          const driveJson = await driveRes.json();
+          if (driveJson.driveUrl) {
+            uploadedDriveUrl = driveJson.driveUrl;
+          }
+          if (driveJson.errorDetails) {
+            console.warn('Drive upload status:', driveJson.errorDetails);
+          }
         } catch (apiErr) {
           console.warn('API Drive upload error:', apiErr);
         }
+
+        // 3. Construct Letter Record
+        const newLetter: Letter = {
+          id: `letter-${Date.now()}`,
+          type: 'KELUAR',
+          number: finalNumber,
+          date,
+          senderOrRecipient: recipient,
+          subject,
+          content,
+          signatory,
+          attachments,
+          fileName: `Surat_${finalNumber.replace(/[\/\\:]/g, '_')}.pdf`,
+          fileUrl: blobUrl,
+          driveUrl: uploadedDriveUrl,
+          status: 'TERKIRIM',
+          createdAt: new Date().toISOString(),
+          year: dateObj.getFullYear(),
+          month: dateObj.getMonth() + 1,
+        };
+
+        // Post to Google Sheets API
+        try {
+          await fetch('/api/letters', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(newLetter),
+          });
+        } catch (sheetsErr) {
+          console.warn('Google Sheets API sync error:', sheetsErr);
+        }
+
+        // Save to storage
+        onSaveLetter(newLetter);
+        setCreatedLetterData(newLetter);
+        setShowPreviewModal(true);
+
+        toast({
+          title: 'Surat Keluar & PDF Berhasil Dibuat!',
+          description: `Nomor: ${finalNumber}. Data diproses.`,
+          type: 'success',
+        });
       }
-
-      // 3. Construct Letter Record
-      const newLetter: Letter = {
-        id: `letter-${Date.now()}`,
-        type: 'KELUAR',
-        number: finalNumber,
-        date,
-        senderOrRecipient: recipient,
-        subject,
-        content,
-        signatory,
-        attachments,
-        fileName: `Surat_${finalNumber.replace(/\//g, '_')}.pdf`,
-        fileUrl: blobUrl,
-        driveUrl: `https://drive.google.com/file/d/drive_${Date.now()}/view`,
-        status: 'TERKIRIM',
-        createdAt: new Date().toISOString(),
-        year: dateObj.getFullYear(),
-        month: dateObj.getMonth() + 1,
-      };
-
-      // Save to storage
-      onSaveLetter(newLetter);
-      setCreatedLetterData(newLetter);
-      setShowPreviewModal(true);
-
-      toast({
-        title: 'Surat Keluar & PDF Berhasil Dibuat!',
-        description: `Nomor: ${finalNumber}. PDF disinkronkan ke Google Drive.`,
-        type: 'success',
-      });
     } catch (error: any) {
       console.error('Error generating PDF:', error);
       toast({
